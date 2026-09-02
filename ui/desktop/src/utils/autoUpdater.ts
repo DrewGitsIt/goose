@@ -11,6 +11,7 @@ import {
 } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { existsSync, readFileSync } from 'fs';
 import log from './logger';
 import { githubUpdater, isInstallerManaged } from './githubUpdater';
 import { loadRecentDirs } from './recentDirs';
@@ -77,9 +78,7 @@ export function registerUpdateIpcHandlers() {
   log.info('Registering update IPC handlers...');
   ipcUpdateHandlersRegistered = true;
 
-  // Fall back to the GitHub API updater. Returns the handler result so the
-  // caller can propagate the GitHub outcome (error / available / not-available)
-  // instead of leaving the UI in a stuck 'checking' state.
+  // Returns the handler result so the renderer always leaves the 'checking' state.
   const runGitHubFallback = async (
     currentVersion: string,
     reason: 'inactive' | 'error',
@@ -198,13 +197,16 @@ export function registerUpdateIpcHandlers() {
       log.info(`=== MANUAL UPDATE CHECK COMPLETED in ${duration}ms ===`);
       log.info('Auto-updater checkForUpdates result:', result);
 
-      // null means electron-updater has no active updater for this install type
-      // (e.g. a deb/rpm install without a usable AppImage). That is NOT "no
-      // update available" — it means the native path is not wired up. Route to
-      // the GitHub fallback so the UI still gets a definitive answer instead
-      // of an unresolved {updateInfo: null, error: null} that leaves the
-      // spinner spinning.
-      if (result === null || result.updateInfo === null) {
+      // null means no updater is active for this install type (no package-type
+      // marker, no APPIMAGE env), not "up to date".
+      if (result === null) {
+        if (!app.isPackaged && !autoUpdater.forceDevUpdateConfig) {
+          log.info('Skipping GitHub fallback: updates are disabled in development builds');
+          return {
+            updateInfo: null,
+            error: 'Updates are disabled in development builds',
+          };
+        }
         log.warn('electron-updater returned null; falling back to GitHub API updater');
         return runGitHubFallback(currentVersion, 'inactive');
       }
@@ -376,10 +378,12 @@ export function setupAutoUpdater() {
   log.info(`Resources path: ${process.resourcesPath}`);
 
   // Set the feed URL for GitHub releases
+  // Inlined at build time by vite.main.config.mts, like githubUpdater's, so a build
+  // made with GITHUB_OWNER=<fork> points both updater paths at that fork's releases.
   const feedConfig = {
     provider: 'github' as const,
-    owner: 'aaif-goose',
-    repo: 'goose',
+    owner: process.env.GITHUB_OWNER || 'aaif-goose',
+    repo: process.env.GITHUB_REPO || 'goose',
     releaseType: 'release' as const,
     // The installer manifest has its own name (scripts/generate-windows-update-manifest.js) so
     // ZIP copies, which request latest.yml, are never moved onto the installer.
@@ -388,6 +392,23 @@ export function setupAutoUpdater() {
 
   log.info('Setting feed URL with config:', feedConfig);
   autoUpdater.setFeedURL(feedConfig);
+
+  // Package variants (e.g. vulkan) share a package name, so each follows its own manifest.
+  if (process.platform === 'linux') {
+    const channelFile = path.join(process.resourcesPath, 'update-channel');
+    if (existsSync(channelFile)) {
+      const channel = readFileSync(channelFile, 'utf8').trim();
+      // The channel becomes a manifest URL path segment; match the generator's rule.
+      if (channel && /^[a-z0-9]+$/.test(channel)) {
+        autoUpdater.channel = channel;
+        // The channel setter turns allowDowngrade on as a side effect.
+        autoUpdater.allowDowngrade = false;
+        log.info(`Update channel set from package marker: ${channel}`);
+      } else if (channel) {
+        log.warn(`Ignoring invalid update channel marker: ${JSON.stringify(channel)}`);
+      }
+    }
+  }
 
   // Log the feed URL after setting it
   try {
@@ -471,6 +492,9 @@ export function setupAutoUpdater() {
         const duration = Date.now() - checkStartTime;
         log.info(`=== STARTUP UPDATE CHECK COMPLETED in ${duration}ms ===`);
         log.info('Update check result:', result);
+        // A null result means no updater is active for this install type (no
+        // package-type marker). We intentionally do nothing on startup; the manual
+        // check surfaces the GitHub fallback when the user asks.
       })
       .catch((err) => {
         clearTimeout(timeoutWarning);
