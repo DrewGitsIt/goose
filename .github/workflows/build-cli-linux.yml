@@ -371,6 +371,8 @@ jobs:
           GOOSE_DESKTOP_LINUX_VARIANT: ${{ matrix.variant }}
         run: |
           source ./bin/activate-hermit
+          # TEST ONLY (#11672 smoke test): point both updater paths at the fork's releases.
+          export GITHUB_OWNER=DrewGitsIt GITHUB_REPO=goose
           cd ui/desktop
           pnpm run package --platform=linux --arch="${ELECTRON_ARCH}"
 
