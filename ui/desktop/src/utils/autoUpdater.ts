@@ -69,6 +69,27 @@ function canUseGithubFallback(error: Error): boolean {
   );
 }
 
+// Package variants (e.g. vulkan) share a package name, so each follows its own manifest.
+function readLinuxUpdateChannel(): string | undefined {
+  if (process.platform !== 'linux') {
+    return undefined;
+  }
+  const channelFile = path.join(process.resourcesPath, 'update-channel');
+  if (!existsSync(channelFile)) {
+    return undefined;
+  }
+  const channel = readFileSync(channelFile, 'utf8').trim();
+  // The channel becomes a manifest URL path segment; match the generator's rule.
+  if (/^[a-z0-9]+$/.test(channel)) {
+    log.info(`Update channel set from package marker: ${channel}`);
+    return channel;
+  }
+  if (channel) {
+    log.warn(`Ignoring invalid update channel marker: ${JSON.stringify(channel)}`);
+  }
+  return undefined;
+}
+
 // Register IPC handlers (only once)
 export function registerUpdateIpcHandlers() {
   if (ipcUpdateHandlersRegistered) {
@@ -205,6 +226,16 @@ export function registerUpdateIpcHandlers() {
           return {
             updateInfo: null,
             error: 'Updates are disabled in development builds',
+          };
+        }
+        // Same rule as canUseGithubFallback: installer copies never take the fallback.
+        if (isInstallerManaged(app.getPath('exe'))) {
+          log.warn(
+            'electron-updater returned null for an installer copy; skipping GitHub fallback'
+          );
+          return {
+            updateInfo: null,
+            error: 'Unable to check for updates. Please restart the application.',
           };
         }
         log.warn('electron-updater returned null; falling back to GitHub API updater');
@@ -377,6 +408,8 @@ export function setupAutoUpdater() {
   log.info(`App path: ${app.getAppPath()}`);
   log.info(`Resources path: ${process.resourcesPath}`);
 
+  const linuxChannel = readLinuxUpdateChannel();
+
   // Set the feed URL for GitHub releases
   // Inlined at build time by vite.main.config.mts, like githubUpdater's, so a build
   // made with GITHUB_OWNER=<fork> points both updater paths at that fork's releases.
@@ -388,27 +421,13 @@ export function setupAutoUpdater() {
     // The installer manifest has its own name (scripts/generate-windows-update-manifest.js) so
     // ZIP copies, which request latest.yml, are never moved onto the installer.
     ...(isInstallerManaged(app.getPath('exe')) ? { channel: 'installer' } : {}),
+    // Passed here rather than through the autoUpdater.channel setter, which also turns on
+    // allowDowngrade.
+    ...(linuxChannel ? { channel: linuxChannel } : {}),
   };
 
   log.info('Setting feed URL with config:', feedConfig);
   autoUpdater.setFeedURL(feedConfig);
-
-  // Package variants (e.g. vulkan) share a package name, so each follows its own manifest.
-  if (process.platform === 'linux') {
-    const channelFile = path.join(process.resourcesPath, 'update-channel');
-    if (existsSync(channelFile)) {
-      const channel = readFileSync(channelFile, 'utf8').trim();
-      // The channel becomes a manifest URL path segment; match the generator's rule.
-      if (channel && /^[a-z0-9]+$/.test(channel)) {
-        autoUpdater.channel = channel;
-        // The channel setter turns allowDowngrade on as a side effect.
-        autoUpdater.allowDowngrade = false;
-        log.info(`Update channel set from package marker: ${channel}`);
-      } else if (channel) {
-        log.warn(`Ignoring invalid update channel marker: ${JSON.stringify(channel)}`);
-      }
-    }
-  }
 
   // Log the feed URL after setting it
   try {
